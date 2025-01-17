@@ -10,24 +10,24 @@ import (
 	"github.com/absmach/magistrala/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"github.com/ultravioletrs/cocos/manager"
+	"github.com/ultravioletrs/cocos/agent/cvm"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
 )
 
 type mockServerStream struct {
 	mock.Mock
-	manager.ManagerService_ProcessServer
+	cvm.CVMService_ProcessServer
 }
 
-func (m *mockServerStream) Send(msg *manager.ServerStreamMessage) error {
+func (m *mockServerStream) Send(msg *cvm.ServerStreamMessage) error {
 	args := m.Called(msg)
 	return args.Error(0)
 }
 
-func (m *mockServerStream) Recv() (*manager.ClientStreamMessage, error) {
+func (m *mockServerStream) Recv() (*cvm.ClientStreamMessage, error) {
 	args := m.Called()
-	return args.Get(0).(*manager.ClientStreamMessage), args.Error(1)
+	return args.Get(0).(*cvm.ClientStreamMessage), args.Error(1)
 }
 
 func (m *mockServerStream) Context() context.Context {
@@ -44,7 +44,7 @@ func (m *mockService) Run(ctx context.Context, ipAddress string, sendMessage Sen
 }
 
 func TestNewServer(t *testing.T) {
-	incoming := make(chan *manager.ClientStreamMessage)
+	incoming := make(chan *cvm.ClientStreamMessage)
 	mockSvc := new(mockService)
 
 	server := NewServer(incoming, mockSvc)
@@ -56,19 +56,19 @@ func TestNewServer(t *testing.T) {
 func TestGrpcServer_Process(t *testing.T) {
 	tests := []struct {
 		name          string
-		recvReturn    *manager.ClientStreamMessage
+		recvReturn    *cvm.ClientStreamMessage
 		recvError     error
 		expectedError string
 	}{
 		{
 			name:          "Process with context deadline exceeded",
-			recvReturn:    &manager.ClientStreamMessage{},
+			recvReturn:    &cvm.ClientStreamMessage{},
 			recvError:     nil,
 			expectedError: "context deadline exceeded",
 		},
 		{
 			name:          "Process with Recv error",
-			recvReturn:    &manager.ClientStreamMessage{},
+			recvReturn:    &cvm.ClientStreamMessage{},
 			recvError:     errors.New("recv error"),
 			expectedError: "recv error",
 		},
@@ -76,7 +76,7 @@ func TestGrpcServer_Process(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			incoming := make(chan *manager.ClientStreamMessage, 1)
+			incoming := make(chan *cvm.ClientStreamMessage, 1)
 			mockSvc := new(mockService)
 			server := NewServer(incoming, mockSvc).(*grpcServer)
 
@@ -111,13 +111,13 @@ func TestGrpcServer_Process(t *testing.T) {
 }
 
 func TestGrpcServer_sendRunReqInChunks(t *testing.T) {
-	incoming := make(chan *manager.ClientStreamMessage)
+	incoming := make(chan *cvm.ClientStreamMessage)
 	mockSvc := new(mockService)
 	server := NewServer(incoming, mockSvc).(*grpcServer)
 
 	mockStream := new(mockServerStream)
 
-	runReq := &manager.ComputationRunReq{
+	runReq := &cvm.ComputationRunReq{
 		Id: "test-id",
 	}
 
@@ -125,10 +125,10 @@ func TestGrpcServer_sendRunReqInChunks(t *testing.T) {
 	for i := range largePayload {
 		largePayload[i] = byte(i % 256)
 	}
-	runReq.Algorithm = &manager.Algorithm{}
+	runReq.Algorithm = &cvm.Algorithm{}
 	runReq.Algorithm.UserKey = largePayload
 
-	mockStream.On("Send", mock.AnythingOfType("*manager.ServerStreamMessage")).Return(nil).Times(4)
+	mockStream.On("Send", mock.AnythingOfType("*cvm.ServerStreamMessage")).Return(nil).Times(4)
 
 	err := server.sendRunReqInChunks(mockStream, runReq)
 
@@ -139,7 +139,7 @@ func TestGrpcServer_sendRunReqInChunks(t *testing.T) {
 	assert.Equal(t, 4, len(calls))
 
 	for i, call := range calls {
-		msg := call.Arguments[0].(*manager.ServerStreamMessage)
+		msg := call.Arguments[0].(*cvm.ServerStreamMessage)
 		chunk := msg.GetRunReqChunks()
 
 		assert.NotNil(t, chunk)
@@ -174,9 +174,9 @@ func TestGrpcServer_ProcessWithMockService(t *testing.T) {
 				mockSvc.On("Run", mock.Anything, "test", mock.Anything, mock.AnythingOfType("mockAuthInfo")).
 					Run(func(args mock.Arguments) {
 						sendFunc := args.Get(2).(SendFunc)
-						runReq := &manager.ComputationRunReq{Id: "test-run-id"}
-						err := sendFunc(&manager.ServerStreamMessage{
-							Message: &manager.ServerStreamMessage_RunReq{
+						runReq := &cvm.ComputationRunReq{Id: "test-run-id"}
+						err := sendFunc(&cvm.ServerStreamMessage{
+							Message: &cvm.ServerStreamMessage_RunReq{
 								RunReq: runReq,
 							},
 						})
@@ -184,34 +184,17 @@ func TestGrpcServer_ProcessWithMockService(t *testing.T) {
 					}).
 					Return()
 
-				mockStream.On("Send", mock.MatchedBy(func(msg *manager.ServerStreamMessage) bool {
+				mockStream.On("Send", mock.MatchedBy(func(msg *cvm.ServerStreamMessage) bool {
 					chunks := msg.GetRunReqChunks()
 					return chunks != nil && chunks.Id == "test-run-id"
 				})).Return(nil)
-			},
-		},
-		{
-			name: "Terminate Request Test",
-			setupMockFn: func(mockSvc *mockService, mockStream *mockServerStream) {
-				mockSvc.On("Run", mock.Anything, "test", mock.Anything, mock.AnythingOfType("mockAuthInfo")).
-					Run(func(args mock.Arguments) {
-						sendFunc := args.Get(2).(SendFunc)
-						err := sendFunc(&manager.ServerStreamMessage{
-							Message: &manager.ServerStreamMessage_TerminateReq{
-								TerminateReq: &manager.Terminate{},
-							},
-						})
-						assert.NoError(t, err)
-					}).Return()
-
-				mockStream.On("Send", mock.AnythingOfType("*manager.ServerStreamMessage")).Return(nil)
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			incoming := make(chan *manager.ClientStreamMessage, 10)
+			incoming := make(chan *cvm.ClientStreamMessage, 10)
 			mockSvc := new(mockService)
 			server := NewServer(incoming, mockSvc).(*grpcServer)
 
@@ -231,7 +214,7 @@ func TestGrpcServer_ProcessWithMockService(t *testing.T) {
 			})
 
 			mockStream.On("Context").Return(peerCtx)
-			mockStream.On("Recv").Return(&manager.ClientStreamMessage{}, nil).Maybe()
+			mockStream.On("Recv").Return(&cvm.ClientStreamMessage{}, nil).Maybe()
 
 			tt.setupMockFn(mockSvc, mockStream)
 
@@ -251,18 +234,18 @@ func TestGrpcServer_ProcessWithMockService(t *testing.T) {
 }
 
 func TestGrpcServer_sendRunReqInChunksError(t *testing.T) {
-	incoming := make(chan *manager.ClientStreamMessage)
+	incoming := make(chan *cvm.ClientStreamMessage)
 	mockSvc := new(mockService)
 	server := NewServer(incoming, mockSvc).(*grpcServer)
 
 	mockStream := new(mockServerStream)
 
-	runReq := &manager.ComputationRunReq{
+	runReq := &cvm.ComputationRunReq{
 		Id: "test-id",
 	}
 
 	// Simulate an error when sending
-	mockStream.On("Send", mock.AnythingOfType("*manager.ServerStreamMessage")).Return(errors.New("send error")).Once()
+	mockStream.On("Send", mock.AnythingOfType("*cvm.ServerStreamMessage")).Return(errors.New("send error")).Once()
 
 	err := server.sendRunReqInChunks(mockStream, runReq)
 
@@ -272,7 +255,7 @@ func TestGrpcServer_sendRunReqInChunksError(t *testing.T) {
 }
 
 func TestGrpcServer_ProcessMissingPeerInfo(t *testing.T) {
-	incoming := make(chan *manager.ClientStreamMessage)
+	incoming := make(chan *cvm.ClientStreamMessage)
 	mockSvc := new(mockService)
 	server := NewServer(incoming, mockSvc).(*grpcServer)
 
